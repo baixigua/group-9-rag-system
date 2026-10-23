@@ -1,0 +1,59 @@
+from typing import Optional
+
+
+def recall_at_k(ranked_filenames: list, expected_doc: Optional[str], k: int) -> Optional[float]:
+    """expected_doc 是否落在 top-k 召回内。expected_doc 为 None 时返回 None（不适用）。"""
+    if expected_doc is None:
+        return None
+    return 1.0 if expected_doc in (ranked_filenames or [])[:k] else 0.0
+
+
+def mrr(ranked_filenames: list, expected_doc: Optional[str]) -> Optional[float]:
+    """expected_doc 在召回排名的倒数。未命中得 0；expected_doc 为 None 返回 None。"""
+    if expected_doc is None:
+        return None
+    for i, f in enumerate(ranked_filenames or [], 1):
+        if f == expected_doc:
+            return 1.0 / i
+    return 0.0
+
+
+def _mean_ignore_none(values: list) -> Optional[float]:
+    nums = [v for v in values if v is not None]
+    return sum(nums) / len(nums) if nums else None
+
+
+def aggregate(per_case: list) -> dict:
+    """把每题指标聚合成数据集级指标。None 不计入均值。"""
+    return {
+        "n": len(per_case),
+        "recall@1": _mean_ignore_none([c.get("recall@1") for c in per_case]),
+        "recall@3": _mean_ignore_none([c.get("recall@3") for c in per_case]),
+        "mrr": _mean_ignore_none([c.get("mrr") for c in per_case]),
+        "assert_pass_rate": (
+            sum(1 for c in per_case if c.get("assert_pass")) / len(per_case)
+            if per_case else None
+        ),
+    }
+
+
+def route_accuracy(pairs: list) -> Optional[float]:
+    """pairs: [(predicted_route, expected_route)]。只统计 expected 非 None 的题。"""
+    judged = [(p, e) for p, e in pairs if e is not None]
+    if not judged:
+        return None
+    return sum(1 for p, e in judged if p == e) / len(judged)
+
+
+def gap_precision_recall(pairs: list) -> tuple:
+    """pairs: [(predicted_triggered: bool, expected_triggered: bool|None)]。
+    只统计 expected 非 None 的题；返回 (precision, recall)，无样本时 (None, None)。"""
+    judged = [(bool(p), bool(e)) for p, e in pairs if e is not None]
+    if not judged:
+        return None, None
+    tp = sum(1 for p, e in judged if p and e)
+    fp = sum(1 for p, e in judged if p and not e)
+    fn = sum(1 for p, e in judged if not p and e)
+    precision = tp / (tp + fp) if (tp + fp) else None
+    recall = tp / (tp + fn) if (tp + fn) else None
+    return precision, recall

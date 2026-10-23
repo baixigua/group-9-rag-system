@@ -1,0 +1,271 @@
+import { defineStore } from 'pinia';
+import axios from 'axios';
+import { apiConfig } from '../config/api';
+
+export const useSessionStore = defineStore('session', {
+  state: () => ({
+    sessions: [],
+    currentSession: null,
+    loading: false,
+    // 显式「新对话」意图：仅登录或点击「新对话」时置 true，
+    // 让 /aichat 页在下次进入时重置为干净界面（切换 tab 返回不会置此标志）
+    newChatRequested: false
+  }),
+  
+  getters: {
+    getSessions: (state) => state.sessions,
+    getCurrentSession: (state) => state.currentSession,
+    isLoading: (state) => state.loading
+  },
+  
+  actions: {
+    // 获取用户的所有会话
+    async getUserSessions(userId, options = {}) {
+      try {
+        this.loading = true;
+        const token = localStorage.getItem('jwt_token');
+        const archived = Boolean(options.archived);
+        
+        const response = await axios.get(`${apiConfig.endpoints.getUserSessions}/${userId}`, {
+          params: { archived },
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+        
+        // 正确处理响应数据，从 response.data.data.sessions 获取会话列表
+        const sessionsData = response.data.data?.sessions || [];
+        
+        // 将会话数据转换为前端需要的格式
+        this.sessions = sessionsData.map(session => ({
+          session_id: session.id,
+          title: session.title,
+          archived: Boolean(session.archived),
+          archived_at: session.archived_at,
+          created_at: session.created_at,
+          updated_at: session.updated_at
+        }));
+        
+        // 按照更新时间和创建时间综合排序（优先按更新时间，其次按创建时间）
+        this.sessions.sort((a, b) => {
+          const dateA = new Date(a.updated_at || a.created_at);
+          const dateB = new Date(b.updated_at || b.created_at);
+          return dateB - dateA; // 降序排列，最新的在前面
+        });
+        
+
+        return {
+          success: true,
+          data: this.sessions
+        };
+      } catch (error) {
+        console.error('获取用户会话失败:', error);
+        return {
+          success: false,
+          message: error.response?.data?.detail || '获取会话失败'
+        };
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    // 归档 / 取消归档会话
+    async setSessionArchived(sessionId, archived) {
+      try {
+        this.loading = true;
+        const token = localStorage.getItem('jwt_token');
+
+        const response = await axios.patch(`${apiConfig.endpoints.archiveSession}${sessionId}/archive`, null, {
+          params: { archived },
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+
+        const sessionData = response.data.data || response.data;
+        if (Array.isArray(this.sessions)) {
+          this.sessions = this.sessions.filter(session => session.session_id !== sessionId);
+        }
+
+        return {
+          success: true,
+          data: sessionData,
+          message: archived ? '会话已归档' : '会话已取消归档'
+        };
+      } catch (error) {
+        console.error('更新会话归档状态失败:', error);
+        return {
+          success: false,
+          message: error.response?.data?.detail || '更新会话归档状态失败'
+        };
+      } finally {
+        this.loading = false;
+      }
+    },
+    
+    // 获取单个会话详情
+    async getSession(sessionId) {
+      try {
+        this.loading = true;
+        const token = localStorage.getItem('jwt_token');
+        
+        const response = await axios.get(`${apiConfig.endpoints.getSession}${sessionId}`, {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+        
+        // 处理可能的包装格式，支持 {code, message, data} 格式
+        const sessionData = response.data.data || response.data;
+        this.currentSession = sessionData;
+        if (sessionData?.session_id === undefined) {
+          this.currentSession.session_id = sessionId;
+        }
+        return {
+          success: true,
+          data: sessionData
+        };
+      } catch (error) {
+        console.error('获取会话详情失败:', error);
+        return {
+          success: false,
+          message: error.response?.data?.detail || '获取会话详情失败'
+        };
+      } finally {
+        this.loading = false;
+      }
+    },
+    
+    // 删除会话
+    async deleteSession(sessionId) {
+      try {
+        this.loading = true;
+        const token = localStorage.getItem('jwt_token');
+        
+        await axios.delete(`${apiConfig.endpoints.deleteSession}${sessionId}`, {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+        
+        // 从本地会话列表中移除
+        if (Array.isArray(this.sessions)) {
+          this.sessions = this.sessions.filter(session => session.session_id !== sessionId);
+        } else {
+          // 如果sessions不是数组，重置为空数组
+          this.sessions = [];
+        }
+        
+        // 如果删除的是当前会话，清除当前会话
+        if (this.currentSession && this.currentSession.session_id === sessionId) {
+          this.currentSession = null;
+        }
+        
+        return {
+          success: true,
+          message: '会话删除成功'
+        };
+      } catch (error) {
+        console.error('删除会话失败:', error);
+        return {
+          success: false,
+          message: error.response?.data?.detail || '删除会话失败'
+        };
+      } finally {
+        this.loading = false;
+      }
+    },
+    
+    // 创建新会话（通过发送第一个消息）
+    async createSession(query) {
+      try {
+        this.loading = true;
+        const token = localStorage.getItem('jwt_token');
+        
+        // 发送第一个消息来创建会话
+        const response = await fetch(apiConfig.endpoints.agentQueryStream, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            query: query
+          })
+        });
+        
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.detail || `HTTP error! status: ${response.status}`);
+        }
+        
+        // 处理SSE流，获取会话ID
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let sessionId = null;
+        
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6);
+              if (!data) continue;
+              
+              try {
+                const json = JSON.parse(data);
+                if (json.session_id) {
+                  sessionId = json.session_id;
+                  break;
+                }
+              } catch (e) {
+                console.error('Error parsing SSE data:', e);
+              }
+            }
+          }
+          
+          if (sessionId) break;
+        }
+        
+        if (sessionId) {
+          // 获取新创建的会话详情
+          const sessionResponse = await this.getSession(sessionId);
+          return sessionResponse;
+        } else {
+          throw new Error('创建会话失败，未获取到会话ID');
+        }
+      } catch (error) {
+        console.error('创建会话失败:', error);
+        return {
+          success: false,
+          message: error.message || '创建会话失败'
+        };
+      } finally {
+        this.loading = false;
+      }
+    },
+    
+    // 设置当前会话
+    setCurrentSession(session) {
+      this.currentSession = session;
+    },
+
+    // 请求开启一段全新的对话（登录 / 点击「新对话」时调用）
+    requestNewChat() {
+      this.currentSession = null;
+      this.newChatRequested = true;
+    },
+    
+    // 清除所有会话
+    clearSessions() {
+      this.sessions = [];
+      this.currentSession = null;
+    }
+  }
+});
